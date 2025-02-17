@@ -1,103 +1,172 @@
-import java.io.*;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.file.*;
+import java.nio.ByteOrder;
 import java.util.Arrays;
+    
+public class feistel {
 
-public class Feistel {
-    private static final int BLOCK_SIZE = 16;
-    private static final int ROUNDS = 10;
-    private static final long MULTIPLIER = 0xA3B2C1L;
+    private static final int BLOCK_LENGTH = 16;
+    private static final int NUM_ROUNDS = 10;
+    private static final long KEY_MULTIPLIER = 1103515245L;
+    private static final long KEY_INCREMENT = 12345L;
 
-    public static void main(String[] args) throws IOException {
-        if (args.length < 4 || (!args[0].equals("-e") && !args[0].equals("-d"))) {
-            System.err.println("Usage: feistel -e password plaintext ciphertext");
-            System.err.println("       feistel -d password ciphertext plaintext");
-            System.exit(1);
+    public static void main(String[] arguments) {
+        if (arguments.length != 4) {
+            System.out.println("Usage:");
+            System.out.println("  Encrypt: java feistel -e <password> <inputFile> <outputFile>");
+            System.out.println("  Decrypt: java feistel -d <password> <inputFile> <outputFile>");
+            return;
         }
 
-        String mode = args[0];
-        String password = args[1];
-        String inputFile = args[2];
-        String outputFile = args[3];
+        String mode = arguments[0];
+        String pwd = arguments[1];
+        String inPath = arguments[2];
+        String outPath = arguments[3];
 
-        byte[] inputBytes = Files.readAllBytes(Paths.get(inputFile));
-        byte[] processed;
-
-        long key = sdbmHash(password.getBytes());
-        long[] roundKeys = generateRoundKeys(key);
-
-        if (mode.equals("-e")) {
-            byte[] padded = pad(inputBytes);
-            processed = processBlocks(padded, roundKeys, true);
-        } else {
-            byte[] decrypted = processBlocks(inputBytes, reverseKeys(roundKeys), false);
-            processed = unpad(decrypted);
+        try {
+            if ("-e".equals(mode)) {
+                performEncryption(pwd, inPath, outPath);
+            } else if ("-d".equals(mode)) {
+                performDecryption(pwd, inPath, outPath);
+            } else {
+                System.out.println("Error: Invalid mode. Use '-e' to encrypt or '-d' to decrypt.");
+            }
+        } catch (IOException ex) {
+            ex.printStackTrace();
         }
-
-        Files.write(Paths.get(outputFile), processed);
     }
 
-    private static long[] generateRoundKeys(long key) {
-        long[] keys = new long[ROUNDS];
-        keys[0] = key;
-        for (int i = 1; i < ROUNDS; i++)
-            keys[i] = (keys[i-1] * 1103515245L + 12345L) & 0xFFFFFFFFFFFFFFFFL;
+    private static void performEncryption(String password, String inputFile, String outputFile) throws IOException {
+        long baseKey = computeHash(password);
+        long[] subKeys = createRoundKeys(baseKey);
+
+        byte[] plainData = loadFile(inputFile);
+        byte[] dataWithPadding = addPadding(plainData);
+
+        ByteArrayOutputStream cipherStream = new ByteArrayOutputStream();
+
+        for (int pos = 0; pos < dataWithPadding.length; pos += BLOCK_LENGTH) {
+            byte[] currentBlock = Arrays.copyOfRange(dataWithPadding, pos, pos + BLOCK_LENGTH);
+            byte[] encBlock = encryptFeistelBlock(currentBlock, subKeys);
+            cipherStream.write(encBlock);
+        }
+        saveFile(outputFile, cipherStream.toByteArray());
+    }
+
+    private static void performDecryption(String password, String inputFile, String outputFile) throws IOException {
+        long baseKey = computeHash(password);
+        long[] subKeys = createRoundKeys(baseKey);
+
+        byte[] cipherData = loadFile(inputFile);
+        ByteArrayOutputStream plainStream = new ByteArrayOutputStream();
+
+        for (int pos = 0; pos < cipherData.length; pos += BLOCK_LENGTH) {
+            byte[] currentBlock = Arrays.copyOfRange(cipherData, pos, pos + BLOCK_LENGTH);
+            byte[] decBlock = decryptFeistelBlock(currentBlock, subKeys);
+            plainStream.write(decBlock);
+        }
+
+        byte[] paddedPlain = plainStream.toByteArray();
+        byte[] originalPlain = removePadding(paddedPlain);
+        saveFile(outputFile, originalPlain);
+    }
+
+    private static byte[] encryptFeistelBlock(byte[] block, long[] keys) {
+        long leftHalf = toLong(block, 0);
+        long rightHalf = toLong(block, 8);
+
+        for (int round = 0; round < NUM_ROUNDS; round++) {
+            long temp = rightHalf;
+            rightHalf = leftHalf ^ feistelRound(rightHalf, keys[round]);
+            leftHalf = temp;
+        }
+        return combineLongs(leftHalf, rightHalf);
+    }
+
+    private static byte[] decryptFeistelBlock(byte[] block, long[] keys) {
+        long leftHalf = toLong(block, 0);
+        long rightHalf = toLong(block, 8);
+
+        for (int round = NUM_ROUNDS - 1; round >= 0; round--) {
+            long temp = leftHalf;
+            leftHalf = rightHalf ^ feistelRound(leftHalf, keys[round]);
+            rightHalf = temp;
+        }
+        return combineLongs(leftHalf, rightHalf);
+    }
+
+    private static long feistelRound(long value, long roundKey) {
+        long mixed = (value ^ roundKey) * 0xa3b2c1L;
+        return (mixed >>> 23) | (mixed << 41);
+    }
+
+    private static long[] createRoundKeys(long seed) {
+        long[] keys = new long[NUM_ROUNDS];
+        keys[0] = seed;
+        for (int i = 1; i < NUM_ROUNDS; i++) {
+            keys[i] = (keys[i - 1] * KEY_MULTIPLIER + KEY_INCREMENT) & 0xffffffffffffffffL;
+        }
         return keys;
     }
 
-    private static long[] reverseKeys(long[] keys) {
-        long[] reversed = new long[ROUNDS];
-        for (int i = 0; i < ROUNDS; i++)
-            reversed[i] = keys[ROUNDS - 1 - i];
-        return reversed;
-    }
-
-    private static byte[] processBlocks(byte[] data, long[] keys, boolean encrypt) {
-        byte[] result = new byte[data.length];
-        for (int i = 0; i < data.length; i += BLOCK_SIZE) {
-            byte[] block = Arrays.copyOfRange(data, i, i + BLOCK_SIZE);
-            ByteBuffer buffer = ByteBuffer.wrap(block);
-            long left = buffer.getLong();
-            long right = buffer.getLong();
-
-            for (long roundKey : keys) {
-                long temp = right;
-                right = left ^ roundFunction(right, roundKey);
-                left = temp;
-            }
-
-            ByteBuffer out = ByteBuffer.allocate(BLOCK_SIZE);
-            out.putLong(right);
-            out.putLong(left);
-            System.arraycopy(out.array(), 0, result, i, BLOCK_SIZE);
+    private static long computeHash(String input) {
+        long hash = 0;
+        for (char ch : input.toCharArray()) {
+            hash = ch + (hash << 6) + (hash << 16) - hash;
         }
-        return result;
+        return hash;
     }
 
-    private static long roundFunction(long input, long key) {
-        long temp = (input ^ key) * MULTIPLIER;
-        return (temp >>> 23) | (temp << 41);
+    private static byte[] loadFile(String path) throws IOException {
+        File file = new File(path);
+        byte[] content = new byte[(int) file.length()];
+        try (FileInputStream inStream = new FileInputStream(file)) {
+            if (inStream.read(content) != content.length) {
+                throw new IOException("Error reading file completely: " + path);
+            }
+        }
+        return content;
     }
 
-    private static byte[] pad(byte[] data) {
-        int padLen = BLOCK_SIZE - (data.length % BLOCK_SIZE);
-        padLen = padLen == 0 ? BLOCK_SIZE : padLen;
-        byte[] padded = Arrays.copyOf(data, data.length + padLen);
-        Arrays.fill(padded, data.length, padded.length, (byte) padLen);
+    private static void saveFile(String path, byte[] data) throws IOException {
+        try (FileOutputStream outStream = new FileOutputStream(path)) {
+            outStream.write(data);
+        }
+    }
+
+    private static byte[] addPadding(byte[] input) {
+        int padLength = BLOCK_LENGTH - (input.length % BLOCK_LENGTH);
+        byte[] padded = new byte[input.length + padLength];
+        System.arraycopy(input, 0, padded, 0, input.length);
+        Arrays.fill(padded, input.length, padded.length, (byte) padLength);
         return padded;
     }
 
-    private static byte[] unpad(byte[] data) {
-        int padLen = data[data.length - 1] & 0xFF;
-        return Arrays.copyOf(data, data.length - padLen);
+    private static byte[] removePadding(byte[] input) {
+        int padLength = input[input.length - 1] & 0xFF;
+        if (padLength < 1 || padLength > BLOCK_LENGTH || padLength > input.length) {
+            throw new IllegalArgumentException("Invalid padding encountered: " + padLength);
+        }
+        for (int i = input.length - padLength; i < input.length; i++) {
+            if (input[i] != (byte) padLength) {
+                throw new IllegalArgumentException("Padding corruption detected.");
+            }
+        }
+        return Arrays.copyOfRange(input, 0, input.length - padLength);
     }
 
-    private static long sdbmHash(byte[] data) {
-        long hash = 0;
-        for (byte b : data) {
-            int c = b & 0xFF;
-            hash = c + (hash << 6) + (hash << 16) - hash;
-        }
-        return hash;
+    private static long toLong(byte[] arr, int startIndex) {
+        return ByteBuffer.wrap(arr, startIndex, 8).order(ByteOrder.BIG_ENDIAN).getLong();
+    }
+
+    private static byte[] combineLongs(long first, long second) {
+        ByteBuffer buffer = ByteBuffer.allocate(BLOCK_LENGTH).order(ByteOrder.BIG_ENDIAN);
+        buffer.putLong(first);
+        buffer.putLong(second);
+        return buffer.array();
     }
 }

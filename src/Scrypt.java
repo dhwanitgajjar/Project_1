@@ -1,31 +1,49 @@
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 
-public class Scrypt {
+public class scrypt {
     public static void main(String[] args) {
-        if (args.length != 3) {
-            System.err.println("Usage: scrypt password plaintext ciphertext");
+        if (args.length < 3 || args.length > 4) {
+            System.err.println("Usage: scrypt [-D] password plaintext ciphertext");
             System.exit(1);
         }
 
-        String password = args[0];
-        String inputFile = args[1];
-        String outputFile = args[2];
+        boolean debug = false;
+        int argIndex = 0;
+
+        // Check for -D flag
+        if (args[argIndex].equals("-D")) {
+            debug = true;
+            argIndex++;
+        }
+
+        String password = args[argIndex];
+        String inputFile = args[argIndex + 1];
+        String outputFile = args[argIndex + 2];
 
         try {
             byte[] passwordBytes = password.getBytes(StandardCharsets.UTF_8);
             long seed = sdbmHash(passwordBytes);
-            int current = (byte) seed & 0xFF;
+            int current = (int) seed & 0xFF;
 
-            try (InputStream in = new FileInputStream(inputFile);
-                 OutputStream out = new FileOutputStream(outputFile)) {
+            if (debug) {
+                System.out.println("Debug Mode ON");
+                System.out.println("Using seed: " + seed);
+            }
+
+            try (InputStream in = new BufferedInputStream(new FileInputStream(inputFile));
+                    OutputStream out = new BufferedOutputStream(new FileOutputStream(outputFile))) {
 
                 int b;
                 while ((b = in.read()) != -1) {
-                    current = (109 * current + 57) % 256;
+                    current = (1103515245 * current + 12345) & 0xFF; // ✅ Fixed LCG formula
+                    if (debug) {
+                        System.out.printf("XOR Byte: 0x%02X -> 0x%02X%n", b, b ^ current);
+                    }
                     out.write(b ^ current);
                 }
             }
+
         } catch (IOException e) {
             e.printStackTrace();
             System.exit(1);
